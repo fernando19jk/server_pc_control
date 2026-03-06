@@ -3,6 +3,7 @@ const { exec } = require("child_process");
 const cors = require("cors");
 const fs = require("fs");
 const path = require("path");
+const { log } = require("console");
 
 const app = express();
 const PORT = 3000;
@@ -52,8 +53,9 @@ app.get("/files", (req, res) => {
 app.get("/apps/running", (req, res) => {
   console.log("\n--- [GET] /apps/running: Consultando procesos ---");
 
-  // Añadimos -ErrorAction SilentlyContinue para evitar que errores de permisos rompan el JSON
-  const psCommand = `Get-Process | Where-Object {$_.MainWindowTitle -ne ''} | Select-Object Name, Id, MainWindowTitle | ConvertTo-Json -Compress`;
+  // Añadimos 'Path' al Select-Object.
+  // Nota: Algunos procesos de sistema o apps de la Tienda de Windows podrían devolver esto vacío (null).
+  const psCommand = `Get-Process | Where-Object {$_.MainWindowTitle -ne ''} | Select-Object Name, Id, MainWindowTitle, Path | ConvertTo-Json -Compress`;
 
   exec(
     `powershell -Command "${psCommand}"`,
@@ -97,23 +99,80 @@ app.get("/apps/running", (req, res) => {
   );
 });
 
-// B. ABRIR APP
+// ABRIR APP CON CONFIRMACIÓN DE 5 SEGUNDOS
 app.post("/apps/open", (req, res) => {
-  const { appName } = req.body;
-  exec(`start ${appName}`, (err) => {
-    if (err)
-      return res.status(500).json({ error: `Fallo al abrir ${appName}` });
-    res.json({ message: `${appName} en ejecución` });
+  const { appPath } = req.body;
+  if (!appPath) return res.status(400).json({ error: "Ruta vacía" });
+
+  console.log(`> Lanzando: ${appPath}`);
+
+  // 1. Damos la orden de abrir
+  exec(`start "" "${appPath}"`, (startErr) => {
+    if (startErr) console.error("Error al lanzar CMD:", startErr);
   });
+
+  // 2. Extraemos el nombre del proceso (ej: de "AnyDesk.exe" a "AnyDesk")
+  const processName = path.basename(appPath, ".exe");
+
+  // 3. Bucle de comprobación (Polling)
+  let attempts = 0;
+  const maxAttempts = 10; // 10 intentos x 500ms = 5 segundos
+
+  const checkInterval = setInterval(() => {
+    attempts++;
+    // Preguntamos a PowerShell si el proceso ya existe
+    exec(
+      `powershell -Command "Get-Process -Name '${processName}' -ErrorAction SilentlyContinue"`,
+      (err, stdout) => {
+        if (stdout.trim()) {
+          // ¡Lo encontró!
+          clearInterval(checkInterval);
+          return res.json({ message: "App abierta y confirmada" });
+        }
+
+        // Si llegamos a los 5 segundos y no se abrió
+        if (attempts >= maxAttempts) {
+          clearInterval(checkInterval);
+          return res
+            .status(500)
+            .json({ error: "Timeout: No se detectó la app tras 5s" });
+        }
+      },
+    );
+  }, 500);
 });
 
-// C. CERRAR APP (Ahora usamos el ID del proceso, es más exacto que el nombre)
+// CERRAR APP CON CONFIRMACIÓN DE 5 SEGUNDOS
 app.post("/apps/close", (req, res) => {
   const { pid } = req.body;
+
+  console.log(`> Cerrando PID: ${pid}`);
   exec(`taskkill /F /PID ${pid}`, (err) => {
-    if (err) return res.status(500).json({ error: "No se pudo cerrar" });
-    res.json({ message: `Proceso ${pid} terminado` });
+    if (err) console.error("Error en taskkill:", err);
   });
+
+  let attempts = 0;
+  const checkInterval = setInterval(() => {
+    attempts++;
+    // Preguntamos a PowerShell si el proceso AÚN existe
+    exec(
+      `powershell -Command "Get-Process -Id ${pid} -ErrorAction SilentlyContinue"`,
+      (err, stdout) => {
+        if (!stdout.trim()) {
+          // Si no devuelve nada, es que ya murió (éxito)
+          clearInterval(checkInterval);
+          return res.json({ message: "App cerrada y confirmada" });
+        }
+
+        if (attempts >= 10) {
+          clearInterval(checkInterval);
+          return res
+            .status(500)
+            .json({ error: "Timeout: La app se resiste a cerrar" });
+        }
+      },
+    );
+  }, 500);
 });
 
 app.listen(PORT, "0.0.0.0", () => {
