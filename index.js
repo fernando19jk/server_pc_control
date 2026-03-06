@@ -48,6 +48,74 @@ app.get("/files", (req, res) => {
   }
 });
 
+// A. LISTAR APPS ABIERTAS (Solo las que tienen ventana visible)
+app.get("/apps/running", (req, res) => {
+  console.log("\n--- [GET] /apps/running: Consultando procesos ---");
+
+  // Añadimos -ErrorAction SilentlyContinue para evitar que errores de permisos rompan el JSON
+  const psCommand = `Get-Process | Where-Object {$_.MainWindowTitle -ne ''} | Select-Object Name, Id, MainWindowTitle | ConvertTo-Json -Compress`;
+
+  exec(
+    `powershell -Command "${psCommand}"`,
+    { maxBuffer: 1024 * 500 },
+    (err, stdout, stderr) => {
+      if (err) {
+        console.error("❌ Error ejecutando PowerShell:", err);
+        return res
+          .status(500)
+          .json({ error: "Error en ejecución de comandos" });
+      }
+
+      if (stderr) {
+        console.warn("⚠️ Advertencia de PowerShell:", stderr);
+      }
+
+      const output = stdout.trim();
+      console.log("📄 Salida bruta de PowerShell:", output || "(vacío)");
+
+      if (!output) {
+        console.log("ℹ️ No se detectaron ventanas abiertas.");
+        return res.json([]);
+      }
+
+      try {
+        let processes = JSON.parse(output);
+
+        // PowerShell a veces devuelve un objeto si es uno solo, o array si son varios
+        if (!Array.isArray(processes)) {
+          processes = [processes];
+        }
+
+        console.log(`✅ Enviando ${processes.length} procesos al móvil.`);
+        res.json(processes);
+      } catch (e) {
+        console.error("❌ Error al parsear JSON:", e.message);
+        console.log("Contenido que falló al parsear:", output);
+        res.status(500).json({ error: "Error de formato en los datos del PC" });
+      }
+    },
+  );
+});
+
+// B. ABRIR APP
+app.post("/apps/open", (req, res) => {
+  const { appName } = req.body;
+  exec(`start ${appName}`, (err) => {
+    if (err)
+      return res.status(500).json({ error: `Fallo al abrir ${appName}` });
+    res.json({ message: `${appName} en ejecución` });
+  });
+});
+
+// C. CERRAR APP (Ahora usamos el ID del proceso, es más exacto que el nombre)
+app.post("/apps/close", (req, res) => {
+  const { pid } = req.body;
+  exec(`taskkill /F /PID ${pid}`, (err) => {
+    if (err) return res.status(500).json({ error: "No se pudo cerrar" });
+    res.json({ message: `Proceso ${pid} terminado` });
+  });
+});
+
 app.listen(PORT, "0.0.0.0", () => {
   console.log(`> Servidor PC activo en puerto ${PORT}`);
 });
