@@ -4,12 +4,24 @@ const cors = require("cors");
 const fs = require("fs");
 const path = require("path");
 const { log } = require("console");
-
+const multer = require("multer");
 const app = express();
 const PORT = 3000;
 
 app.use(cors());
 app.use(express.json());
+
+// Configuración de Multer para guardar el archivo donde le digamos
+const storage = multer.diskStorage({
+  destination: (req, file, cb) => {
+    // req.body.path contendrá la ruta actual donde estás en la app
+    cb(null, req.body.path || "C:\\");
+  },
+  filename: (req, file, cb) => {
+    cb(null, file.originalname);
+  },
+});
+const upload = multer({ storage });
 
 // 1. Ver estado
 app.get("/status", (req, res) => {
@@ -49,7 +61,24 @@ app.get("/files", (req, res) => {
   }
 });
 
-// A. LISTAR APPS ABIERTAS (Solo las que tienen ventana visible)
+// 4. DESCARGAR ARCHIVO (PC -> Móvil)
+app.get("/files/download", (req, res) => {
+  const targetPath = req.query.path;
+  if (!fs.existsSync(targetPath)) {
+    return res.status(404).json({ error: "Archivo no encontrado" });
+  }
+  // res.download maneja la transmisión del archivo automáticamente
+  res.download(targetPath);
+});
+
+// 5. SUBIR ARCHIVO (Móvil -> PC)
+app.post("/files/upload", upload.single("file"), (req, res) => {
+  if (!req.file)
+    return res.status(400).json({ error: "No se recibió archivo" });
+  res.json({ message: "Archivo subido correctamente al PC" });
+});
+
+// 6. LISTAR APPS ABIERTAS (Solo las que tienen ventana visible)
 app.get("/apps/running", (req, res) => {
   console.log("\n--- [GET] /apps/running: Consultando procesos ---");
 
@@ -99,7 +128,7 @@ app.get("/apps/running", (req, res) => {
   );
 });
 
-// ABRIR APP CON CONFIRMACIÓN DE 5 SEGUNDOS
+// 7. ABRIR APP CON CONFIRMACIÓN DE 5 SEGUNDOS
 app.post("/apps/open", (req, res) => {
   const { appPath } = req.body;
   if (!appPath) return res.status(400).json({ error: "Ruta vacía" });
@@ -142,7 +171,7 @@ app.post("/apps/open", (req, res) => {
   }, 500);
 });
 
-// CERRAR APP CON CONFIRMACIÓN DE 5 SEGUNDOS
+// 8. CERRAR APP CON CONFIRMACIÓN DE 5 SEGUNDOS
 app.post("/apps/close", (req, res) => {
   const { pid } = req.body;
 
