@@ -72,10 +72,15 @@ app.get("/files/download", (req, res) => {
 });
 
 // 5. SUBIR ARCHIVO (Móvil -> PC)
-app.post("/files/upload", upload.single("file"), (req, res) => {
-  if (!req.file)
-    return res.status(400).json({ error: "No se recibió archivo" });
-  res.json({ message: "Archivo subido correctamente al PC" });
+app.post("/files/upload", upload.array("files"), (req, res) => {
+  if (!req.files || req.files.length === 0) {
+    return res.status(400).json({ error: "No se recibieron archivos" });
+  }
+
+  // Aquí devolvemos la confirmación exacta de cuántos se subieron
+  res.json({
+    message: `¡${req.files.length} archivo(s) subido(s) correctamente al PC!`,
+  });
 });
 
 // 6. LISTAR APPS ABIERTAS (Solo las que tienen ventana visible)
@@ -136,64 +141,93 @@ app.post("/apps/open", (req, res) => {
   console.log(`> Lanzando: ${appPath}`);
 
   // 1. Damos la orden de abrir
+  const { exec } = require("child_process");
+  const path = require("path");
+
   exec(`start "" "${appPath}"`, (startErr) => {
     if (startErr) console.error("Error al lanzar CMD:", startErr);
   });
 
-  // 2. Extraemos el nombre del proceso (ej: de "AnyDesk.exe" a "AnyDesk")
+  // 2. Extraemos el nombre del proceso
   const processName = path.basename(appPath, ".exe");
 
-  // 3. Bucle de comprobación (Polling)
+  // 3. Bucle de comprobación (Polling) OPTIMIZADO
   let attempts = 0;
-  const maxAttempts = 10; // 10 intentos x 500ms = 5 segundos
+  const maxAttempts = 5; // 5 intentos x 1000ms = 5 segundos
+
+  let hasResponded = false;
 
   const checkInterval = setInterval(() => {
     attempts++;
-    // Preguntamos a PowerShell si el proceso ya existe
+
     exec(
       `powershell -Command "Get-Process -Name '${processName}' -ErrorAction SilentlyContinue"`,
       (err, stdout) => {
+        // Si ya respondimos antes, cortamos
+        if (hasResponded) return;
+
         if (stdout.trim()) {
           // ¡Lo encontró!
+          hasResponded = true;
           clearInterval(checkInterval);
-          return res.json({ message: "App abierta y confirmada" });
+          return res.json({
+            message: `App ${processName} abierta y confirmada`,
+          });
         }
 
-        // Si llegamos a los 5 segundos y no se abrió
+        // Si llegamos a los 5 intentos (5 segundos)
         if (attempts >= maxAttempts) {
+          hasResponded = true;
           clearInterval(checkInterval);
           return res
             .status(500)
-            .json({ error: "Timeout: No se detectó la app tras 5s" });
+            .json({ error: `Timeout: No se detectó ${processName} tras 5s` });
         }
       },
     );
-  }, 500);
+  }, 1000); // <-- Comprobación cada 1000ms (1 segundo)
 });
 
 // 8. CERRAR APP CON CONFIRMACIÓN DE 5 SEGUNDOS
 app.post("/apps/close", (req, res) => {
   const { pid } = req.body;
 
+  if (!pid) return res.status(400).json({ error: "Falta el PID" });
+
   console.log(`> Cerrando PID: ${pid}`);
+  const { exec } = require("child_process");
+
+  // Lanzamos el comando para matar el proceso
   exec(`taskkill /F /PID ${pid}`, (err) => {
     if (err) console.error("Error en taskkill:", err);
   });
 
   let attempts = 0;
+  const maxAttempts = 5; // 5 intentos x 1000ms = 5 segundos
+
+  // ¡Nuestra bandera salvavidas!
+  let hasResponded = false;
+
   const checkInterval = setInterval(() => {
     attempts++;
+
     // Preguntamos a PowerShell si el proceso AÚN existe
     exec(
       `powershell -Command "Get-Process -Id ${pid} -ErrorAction SilentlyContinue"`,
       (err, stdout) => {
+        // Si ya respondimos a esta petición, ignoramos cualquier callback atrasado
+        if (hasResponded) return;
+
         if (!stdout.trim()) {
-          // Si no devuelve nada, es que ya murió (éxito)
+          // Si no devuelve nada, es que el proceso ya murió (éxito)
+          hasResponded = true;
           clearInterval(checkInterval);
           return res.json({ message: "App cerrada y confirmada" });
         }
 
-        if (attempts >= 10) {
+        // Si llegamos al límite de intentos y sigue viva
+        if (attempts >= maxAttempts) {
+          hasResponded = true;
           clearInterval(checkInterval);
           return res
             .status(500)
@@ -201,7 +235,7 @@ app.post("/apps/close", (req, res) => {
         }
       },
     );
-  }, 500);
+  }, 1000); // <-- Cambiado a 1000ms (1 segundo)
 });
 
 app.listen(PORT, "0.0.0.0", () => {
